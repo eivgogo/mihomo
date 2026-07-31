@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/metacubex/tailscale/net/netmon"
 	"github.com/metacubex/tailscale/tailcfg"
 	"github.com/metacubex/tailscale/tsnet"
+	"github.com/metacubex/tailscale/types/nettype"
 	D "github.com/miekg/dns"
 	"github.com/samber/lo"
 )
@@ -47,6 +50,9 @@ type Tailscale struct {
 	serverStarted bool
 
 	unregisterDNSResolver func()
+
+	unregisterFallbackTCP func()
+	unregisterFallbackUDP func()
 }
 
 type TailscaleOption struct {
@@ -177,6 +183,66 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
 	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
 	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
+
+	outbound.unregisterFallbackTCP = outbound.server.RegisterFallbackTCPHandler(
+		func(src, dst netip.AddrPort) (handler func(net.Conn), intercept bool) {
+			return func(conn net.Conn) {
+				defer conn.Close()
+				target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(dst.Port())))
+				log.Debugln("[Tailscale](%s) fallback TCP %s -> %s", option.Name, dst, target)
+				outgoing, err := net.DialTimeout("tcp", target, 10*time.Second)
+				if err != nil {
+					log.Warnln("[Tailscale](%s) fallback TCP dial %s failed: %v", option.Name, target, err)
+					return
+				}
+				defer outgoing.Close()
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					_, _ = io.Copy(outgoing, conn)
+					_ = outgoing.Close()
+				}()
+				go func() {
+					defer wg.Done()
+					_, _ = io.Copy(conn, outgoing)
+				}()
+				wg.Wait()
+			}, true
+		},
+	)
+	outbound.unregisterFallbackUDP = outbound.server.RegisterFallbackUDPHandler(
+		func(src, dst netip.AddrPort) (handler func(nettype.ConnPacketConn), intercept bool) {
+			return func(c nettype.ConnPacketConn) {
+				defer c.Close()
+				target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(dst.Port())))
+				log.Debugln("[Tailscale](%s) fallback UDP %s -> %s", option.Name, dst, target)
+				targetAddr, err := net.ResolveUDPAddr("udp", target)
+				if err != nil {
+					log.Warnln("[Tailscale](%s) fallback UDP resolve %s failed: %v", option.Name, target, err)
+					return
+				}
+				localConn, err := net.DialUDP("udp", nil, targetAddr)
+				if err != nil {
+					log.Warnln("[Tailscale](%s) fallback UDP dial %s failed: %v", option.Name, target, err)
+					return
+				}
+				defer localConn.Close()
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					_, _ = io.Copy(localConn, c)
+				}()
+				go func() {
+					defer wg.Done()
+					_, _ = io.Copy(c, localConn)
+				}()
+				wg.Wait()
+			}, true
+		},
+	)
+
 	return outbound, nil
 }
 
@@ -465,6 +531,12 @@ func (t *Tailscale) Close() error {
 	t.cancel()
 	if t.unregisterDNSResolver != nil {
 		t.unregisterDNSResolver()
+	}
+	if t.unregisterFallbackTCP != nil {
+		t.unregisterFallbackTCP()
+	}
+	if t.unregisterFallbackUDP != nil {
+		t.unregisterFallbackUDP()
 	}
 	t.startOnce.Do(func() {
 		t.startErr = errors.New("tailscale outbound closed")
