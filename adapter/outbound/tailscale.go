@@ -6,13 +6,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface/anet"
@@ -25,9 +28,11 @@ import (
 	"github.com/metacubex/tailscale/envknob"
 	"github.com/metacubex/tailscale/hostinfo"
 	"github.com/metacubex/tailscale/ipn"
+	"github.com/metacubex/tailscale/ipn/ipnstate"
 	"github.com/metacubex/tailscale/net/netmon"
 	"github.com/metacubex/tailscale/tailcfg"
 	"github.com/metacubex/tailscale/tsnet"
+	"github.com/metacubex/tailscale/types/nettype"
 	D "github.com/miekg/dns"
 	"github.com/samber/lo"
 )
@@ -49,6 +54,9 @@ type Tailscale struct {
 	serverStarted bool
 
 	unregisterDNSResolver func()
+
+	unregisterFallbackTCP func()
+	unregisterFallbackUDP func()
 }
 
 type TailscaleOption struct {
@@ -64,6 +72,10 @@ type TailscaleOption struct {
 	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
 	ExitNode               string `proxy:"exit-node,omitempty"`
 	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+
+	RelayServerPort *uint16 `proxy:"relay-server-port,omitempty"`
+
+	Lazy *bool `proxy:"lazy,omitempty"`
 }
 
 func init() {
@@ -180,6 +192,63 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
 	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
 	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
+
+	outbound.unregisterFallbackTCP = outbound.server.RegisterFallbackTCPHandler(
+		func(src, dst netip.AddrPort) (handler func(net.Conn), intercept bool) {
+			return func(conn net.Conn) {
+				defer conn.Close()
+				target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(dst.Port())))
+				log.Debugln("[Tailscale](%s) fallback TCP %s -> %s", option.Name, dst, target)
+				outgoing, err := net.DialTimeout("tcp", target, 10*time.Second)
+				if err != nil {
+					log.Warnln("[Tailscale](%s) fallback TCP dial %s failed: %v", option.Name, target, err)
+					return
+				}
+				N.Relay(conn, outgoing)
+			}, true
+		},
+	)
+	outbound.unregisterFallbackUDP = outbound.server.RegisterFallbackUDPHandler(
+		func(src, dst netip.AddrPort) (handler func(nettype.ConnPacketConn), intercept bool) {
+			return func(c nettype.ConnPacketConn) {
+				defer c.Close()
+				target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(dst.Port())))
+				log.Debugln("[Tailscale](%s) fallback UDP %s -> %s", option.Name, dst, target)
+				targetAddr, err := net.ResolveUDPAddr("udp", target)
+				if err != nil {
+					log.Warnln("[Tailscale](%s) fallback UDP resolve %s failed: %v", option.Name, target, err)
+					return
+				}
+				localConn, err := net.DialUDP("udp", nil, targetAddr)
+				if err != nil {
+					log.Warnln("[Tailscale](%s) fallback UDP dial %s failed: %v", option.Name, target, err)
+					return
+				}
+				defer localConn.Close()
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					_, _ = io.Copy(localConn, c)
+				}()
+				go func() {
+					defer wg.Done()
+					_, _ = io.Copy(c, localConn)
+				}()
+				wg.Wait()
+			}, true
+		},
+	)
+
+	if option.Lazy != nil && !*option.Lazy {
+		log.Infoln("[Tailscale](%s) lazy disabled, start on boot", option.Name)
+		go func() {
+			if err := outbound.start(); err != nil {
+				log.Warnln("[Tailscale](%s) start on boot failed: %v", option.Name, err)
+			}
+		}()
+	}
+
 	return outbound, nil
 }
 
@@ -332,6 +401,11 @@ func buildTailscaleMaskedPrefs(option TailscaleOption) (*ipn.MaskedPrefs, error)
 		mp.ExitNodeAllowLANAccessSet = true
 		changed = true
 	}
+	if option.RelayServerPort != nil {
+		mp.RelayServerPort = option.RelayServerPort
+		mp.RelayServerPortSet = true
+		changed = true
+	}
 	if !changed {
 		return nil, nil
 	}
@@ -370,6 +444,7 @@ func (t *Tailscale) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.
 		if err != nil {
 			return nil, err
 		}
+		t.logConnType(ctx, dst.Addr())
 		return tcpConn, nil
 	})))
 	var conn net.Conn
@@ -402,6 +477,7 @@ func (t *Tailscale) ListenPacketContext(ctx context.Context, metadata *C.Metadat
 	if pc == nil {
 		return nil, errors.New("packetConn is nil")
 	}
+	t.logConnType(ctx, metadata.DstIP)
 	return NewPacketConn(pc, t), nil
 }
 
@@ -414,6 +490,55 @@ func (t *Tailscale) ResolveUDP(ctx context.Context, metadata *C.Metadata) error 
 		metadata.DstIP = ip
 	}
 	return nil
+}
+
+// logConnType queries the tailscale status to determine whether the connection
+// to dst is a point-to-point (direct) connection or goes through a DERP relay,
+// then logs the result.
+func (t *Tailscale) logConnType(ctx context.Context, dst netip.Addr) {
+	lc, err := t.server.LocalClient()
+	if err != nil {
+		return
+	}
+	status, err := lc.Status(ctx)
+	if err != nil {
+		return
+	}
+
+	// find the peer that owns the destination tailscale ip
+	var peer *ipnstate.PeerStatus
+	for _, ps := range status.Peer {
+		if ps == nil {
+			continue
+		}
+		for _, ip := range ps.TailscaleIPs {
+			if ip == dst {
+				peer = ps
+				break
+			}
+		}
+		if peer != nil {
+			break
+		}
+	}
+
+	connType := ""
+	switch {
+	case peer != nil && peer.CurAddr != "":
+		// CurAddr set means a direct (P2P) path is in use
+		connType = fmt.Sprintf("direct (P2P) via %s", peer.CurAddr)
+	case peer != nil && peer.Relay != "":
+		connType = fmt.Sprintf("relay (DERP region %s)", peer.Relay)
+	case peer != nil && !peer.Online:
+		connType = "peer offline"
+	case status.ExitNodeStatus != nil:
+		connType = fmt.Sprintf("external via exit node %s", status.ExitNodeStatus.ID)
+	case peer == nil:
+		connType = "external (not a tailscale peer)"
+	default:
+		connType = "unknown"
+	}
+	log.Infoln("[Tailscale](%s) connection to %s: %s", t.Name(), dst, connType)
 }
 
 type tailscaleDNSTransport struct {
@@ -468,6 +593,12 @@ func (t *Tailscale) Close() error {
 	t.cancel()
 	if t.unregisterDNSResolver != nil {
 		t.unregisterDNSResolver()
+	}
+	if t.unregisterFallbackTCP != nil {
+		t.unregisterFallbackTCP()
+	}
+	if t.unregisterFallbackUDP != nil {
+		t.unregisterFallbackUDP()
 	}
 	t.startOnce.Do(func() {
 		t.startErr = errors.New("tailscale outbound closed")
