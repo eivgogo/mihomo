@@ -21,6 +21,8 @@ type TailscaleOption struct {
 	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
 	ExitNode               string `proxy:"exit-node,omitempty"`
 	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+
+	Lazy *bool `proxy:"lazy,omitempty"`
 }
 
 func NewTailscale(option TailscaleOption) (*Tailscale, error) {
