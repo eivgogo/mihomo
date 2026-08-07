@@ -27,6 +27,7 @@ import (
 	"github.com/metacubex/tailscale/envknob"
 	"github.com/metacubex/tailscale/hostinfo"
 	"github.com/metacubex/tailscale/ipn"
+	"github.com/metacubex/tailscale/ipn/ipnstate"
 	"github.com/metacubex/tailscale/net/netmon"
 	"github.com/metacubex/tailscale/tailcfg"
 	"github.com/metacubex/tailscale/tsnet"
@@ -436,6 +437,7 @@ func (t *Tailscale) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.
 		if err != nil {
 			return nil, err
 		}
+		t.logConnType(ctx, dst.Addr())
 		return tcpConn, nil
 	})))
 	var conn net.Conn
@@ -468,6 +470,7 @@ func (t *Tailscale) ListenPacketContext(ctx context.Context, metadata *C.Metadat
 	if pc == nil {
 		return nil, errors.New("packetConn is nil")
 	}
+	t.logConnType(ctx, metadata.DstIP)
 	return NewPacketConn(pc, t), nil
 }
 
@@ -480,6 +483,55 @@ func (t *Tailscale) ResolveUDP(ctx context.Context, metadata *C.Metadata) error 
 		metadata.DstIP = ip
 	}
 	return nil
+}
+
+// logConnType queries the tailscale status to determine whether the connection
+// to dst is a point-to-point (direct) connection or goes through a DERP relay,
+// then logs the result.
+func (t *Tailscale) logConnType(ctx context.Context, dst netip.Addr) {
+	lc, err := t.server.LocalClient()
+	if err != nil {
+		return
+	}
+	status, err := lc.Status(ctx)
+	if err != nil {
+		return
+	}
+
+	// find the peer that owns the destination tailscale ip
+	var peer *ipnstate.PeerStatus
+	for _, ps := range status.Peer {
+		if ps == nil {
+			continue
+		}
+		for _, ip := range ps.TailscaleIPs {
+			if ip == dst {
+				peer = ps
+				break
+			}
+		}
+		if peer != nil {
+			break
+		}
+	}
+
+	connType := ""
+	switch {
+	case peer != nil && peer.CurAddr != "":
+		// CurAddr set means a direct (P2P) path is in use
+		connType = fmt.Sprintf("direct (P2P) via %s", peer.CurAddr)
+	case peer != nil && peer.Relay != "":
+		connType = fmt.Sprintf("relay (DERP region %s)", peer.Relay)
+	case peer != nil && !peer.Online:
+		connType = "peer offline"
+	case status.ExitNodeStatus != nil:
+		connType = fmt.Sprintf("external via exit node %s", status.ExitNodeStatus.ID)
+	case peer == nil:
+		connType = "external (not a tailscale peer)"
+	default:
+		connType = "unknown"
+	}
+	log.Infoln("[Tailscale](%s) connection to %s: %s", t.Name(), dst, connType)
 }
 
 type tailscaleDNSTransport struct {
