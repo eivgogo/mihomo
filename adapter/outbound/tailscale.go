@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface/anet"
@@ -199,19 +200,7 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 					log.Warnln("[Tailscale](%s) fallback TCP dial %s failed: %v", option.Name, target, err)
 					return
 				}
-				defer outgoing.Close()
-				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
-					_, _ = io.Copy(outgoing, conn)
-					_ = outgoing.Close()
-				}()
-				go func() {
-					defer wg.Done()
-					_, _ = io.Copy(conn, outgoing)
-				}()
-				wg.Wait()
+				N.Relay(conn, outgoing)
 			}, true
 		},
 	)
