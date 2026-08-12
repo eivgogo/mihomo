@@ -1352,6 +1352,7 @@ proxies: # socks5
     # accept-routes: true # 是否接受 Tailnet 中发布的 subnet routes
     # exit-node: 100.64.0.1 # 使用指定 exit node，可填写节点 IP；也支持 auto:any
     # exit-node-allow-lan-access: true # 使用 exit node 时是否允许访问本地 LAN
+    # relay-server-port: 41641 # 可选；启用 Peer Relay 中继服务，指定 UDP 端口，nil 时关闭该功能（对应 tailscale set --relay-server-port）
     # 当目标不在 Tailscale 路由内时，连接会直接报错，不会回退到直连；
     # 访问公网需要配置可用的 exit-node，或接受覆盖目标网段的 subnet routes。
     # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出 Tailscale 控制面和 DERP/STUN 等连接

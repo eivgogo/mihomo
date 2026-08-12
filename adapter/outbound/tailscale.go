@@ -72,6 +72,8 @@ type TailscaleOption struct {
 	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
 	ExitNode               string `proxy:"exit-node,omitempty"`
 	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+
+	RelayServerPort *uint16 `proxy:"relay-server-port,omitempty"`
 }
 
 func init() {
@@ -386,6 +388,11 @@ func buildTailscaleMaskedPrefs(option TailscaleOption) (*ipn.MaskedPrefs, error)
 	if option.ExitNodeAllowLANAccess != nil && !tailscaleExitNodeNeedsStatus(option) {
 		mp.ExitNodeAllowLANAccess = *option.ExitNodeAllowLANAccess
 		mp.ExitNodeAllowLANAccessSet = true
+		changed = true
+	}
+	if option.RelayServerPort != nil {
+		mp.RelayServerPort = option.RelayServerPort
+		mp.RelayServerPortSet = true
 		changed = true
 	}
 	if !changed {
