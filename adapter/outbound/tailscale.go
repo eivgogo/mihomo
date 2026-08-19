@@ -74,6 +74,8 @@ type TailscaleOption struct {
 	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
 
 	RelayServerPort *uint16 `proxy:"relay-server-port,omitempty"`
+
+	Lazy *bool `proxy:"lazy,omitempty"`
 }
 
 func init() {
@@ -237,6 +239,15 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 			}, true
 		},
 	)
+
+	if option.Lazy != nil && !*option.Lazy {
+		log.Infoln("[Tailscale](%s) lazy disabled, start on boot", option.Name)
+		go func() {
+			if err := outbound.start(); err != nil {
+				log.Warnln("[Tailscale](%s) start on boot failed: %v", option.Name, err)
+			}
+		}()
+	}
 
 	return outbound, nil
 }
