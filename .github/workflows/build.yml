@@ -11,13 +11,13 @@ on:
       - "README.md"
       - ".github/ISSUE_TEMPLATE/**"
     branches:
-      - Alpha
+      # - Alpha
       - me
     tags:
       - "v*"
   pull_request:
     branches:
-      - Alpha
+      # - Alpha
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
