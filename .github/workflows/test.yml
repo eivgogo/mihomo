@@ -6,12 +6,12 @@ on:
       - "README.md"
       - ".github/ISSUE_TEMPLATE/**"
     branches:
-      - Alpha
+      # - Alpha
     tags:
-      - "v*"
+      # - "v*"
   pull_request:
     branches:
-      - Alpha
+      # - Alpha
 
 jobs:
   test:
