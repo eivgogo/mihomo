@@ -7,9 +7,9 @@ on:
       - "README.md"
       - ".github/ISSUE_TEMPLATE/**"
     branches:
-      - Alpha
+      # - Alpha
     tags:
-      - "v*"
+      # - "v*"
       
 jobs:
   # Send "core-updated" to MetaCubeX/ClashMetaForAndroid to trigger update-dependencies

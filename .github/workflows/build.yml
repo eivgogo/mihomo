@@ -14,7 +14,7 @@ on:
       # - Alpha
       - me
     tags:
-      - "v*"
+      # - "v*"
   pull_request:
     branches:
       # - Alpha
