@@ -12,6 +12,8 @@ on:
       - ".github/ISSUE_TEMPLATE/**"
     branches:
       - me
+    tags:
+      - "v*"
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true

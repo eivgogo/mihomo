@@ -1,4 +1,3 @@
-# ci trigger test
 NAME=mihomo
 BINDIR=bin
 BRANCH=$(shell git branch --show-current)
